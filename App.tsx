@@ -6,8 +6,9 @@ import {
   DemoEpisode, DemoSample
 } from './types';
 import {
-  DEFAULT_WORLD, DT, DEMO_CODE, DEFAULT_VEHICLE_CONFIG
+  DEFAULT_WORLD, DT, DEFAULT_VEHICLE_CONFIG
 } from './constants';
+import { CODE_TEMPLATES, ADVANCED_CPP_CODE } from './services/AdvancedCode';
 import { updatePhysics, checkRobotCollision } from './services/PhysicsEngine';
 import { CodeRunner } from './services/CodeRunner';
 import { generateRobotHeader } from './services/ArduinoGenerator';
@@ -100,7 +101,7 @@ const App: React.FC = () => {
   // --- Global State ---
   const { state: world, setState: setWorld, setStateWithoutHistory: setWorldWithoutHistory, undo, redo, canUndo, canRedo } = useHistory<WorldState>(DEFAULT_WORLD);
   const [vehicleConfig, setVehicleConfig] = useState<VehicleConfig>(DEFAULT_VEHICLE_CONFIG);
-  const [code, setCode] = useState<string>(DEMO_CODE);
+  const [code, setCode] = useState<string>(CODE_TEMPLATES.advanced);
   const [generatedHeader, setGeneratedHeader] = useState<string>('');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [mode, setMode] = useState<AppMode>('play');
@@ -432,32 +433,40 @@ const App: React.FC = () => {
   };
 
   const exportArduinoCode = () => {
-    const fullCode = `/*
- * PROJECT: Arduino Web Sim Export
+    // If the user hasn't touched the advanced code (simple check), export the robust C++.
+    // Otherwise, wrap the JS as before (which won't compile in C++ but preserves their edits).
+    // Better: We explicitly check if it's the advanced template.
+    const isAdvanced = code.trim() === CODE_TEMPLATES.advanced.trim();
+
+    let content = "";
+    if (isAdvanced) {
+      content = `/*
+ * EXPORTED FROM WEBSIM (ADVANCED MODE)
  * DATE: ${new Date().toISOString()}
- * 
- * NOTE: This file concatenates the configuration header and the user sketch.
- * In a real project, you might split 'robot_config.h' into a separate file.
  */
 
-// ==========================================
-//        ROBOT CONFIGURATION
-// ==========================================
+${ADVANCED_CPP_CODE}`;
+    } else {
+      content = `/*
+ * EXPORTED FROM WEBSIM
+ * WARN: This is the raw simulation code (JS-like). 
+ * It may need manual porting to C++ if heavily modified.
+ */
+
 ${generatedHeader}
 
-// ==========================================
-//           USER SKETCH
-// ==========================================
 ${code}
 `;
-    const blob = new Blob([fullCode], { type: 'text/x-c' });
+    }
+
+    const blob = new Blob([content], { type: 'text/x-c' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `MyRobot_${Date.now()}.ino`;
+    a.download = isAdvanced ? `Robot_Advanced_${Date.now()}.ino` : `Robot_Sketch_${Date.now()}.ino`;
     a.click();
     URL.revokeObjectURL(url);
-    addLog("Arduino Code (.ino) exported", "system");
+    addLog("Arduino Code exported", "system");
   };
 
   // --- Loop ---
