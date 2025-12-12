@@ -194,14 +194,24 @@ class ESTrainer:
         return self.policy, final_stats
 
     def log_to_file(self, entry):
+        # 1. Offline Log (Persistent)
         log_dir = "offline/logs"
         os.makedirs(log_dir, exist_ok=True)
         log_file = os.path.join(log_dir, "training_log.csv")
         
-        # Header check
-        file_exists = os.path.isfile(log_file)
+        # 2. Public Log (Web Accessible)
+        public_dir = "public"
+        os.makedirs(public_dir, exist_ok=True)
+        public_file = os.path.join(public_dir, "training_log.csv")
         
-        with open(log_file, 'a') as f:
+        self._write_log_line(log_file, entry)
+        self._write_log_line(public_file, entry)
+
+    def _write_log_line(self, filepath, entry):
+        # Header check
+        file_exists = os.path.isfile(filepath)
+        
+        with open(filepath, 'a') as f:
             if not file_exists:
                 f.write("generation,reward_mean,reward_std,reward_max,reward_min,low_v_pct,avg_w_v_ratio\n")
             
@@ -242,58 +252,55 @@ def main():
     print(f"Reward Params: lambda_rot={args.lambda_rot}")
         
     
-    # Create Env
-    env = RobotEnv(env_config, veh_config)
+    # Create Env Temporary to get dims (or reuse logic)
+    # Actually we create env later with scaler.
+    # But we need input_dim for policy creation.
+    # Let's create a dummy env OR compute dims manually from config.
+    # Robust way: Create env without scaler first to get raw dims.
+    temp_env = RobotEnv(env_config, veh_config, scaler=None)
     
     # Create Policy
     # Dimensions: obs_dim -> 16 -> 8 -> 2
-    input_dim = env.obs_dim
+    input_dim = temp_env.obs_dim
     hidden_sizes = (16, 8)
-    output_dim = env.act_dim
+    output_dim = temp_env.act_dim
     
     policy = PolicyMLP(input_dim, hidden_sizes, output_dim)
-    
+
+    # Scaler for normalizing inputs (loaded from init policy if avail)
+    scaler_stats = None
+
     # Init from file if requested
     if args.init_policy and os.path.exists(args.init_policy):
         print(f"Initializing from {args.init_policy}...")
         with open(args.init_policy, 'r') as f:
             weights_data = json.load(f)
-            # Parse weights and set
-            # Check format from 'types.ts' / 'train_policy.py'
-            # "weights": list of matrices, "biases": list of vectors
-            # Need to convert list to numpy
             
             w_list = [np.array(w) for w in weights_data["weights"]] 
             b_list = [np.array(b) for b in weights_data["biases"]]
             
-            # Logic to transpose?
-            # train_policy.py export: weights_list = [w.T.tolist() ...]
-            # So here we read w.T. We need w back.
-            # w_loaded is [units, inputs]. policy needs [inputs, units].
-            # So transpose back.
-            
-            # policy.weights = [w.T for w in w_list]
-            # Wait, verify carefully.
-            # train_policy: w shape [in, out]. w.T shape [out, in]. JSON has [out, in].
-            # So loading JSON gives [out, in]. We need [in, out].
-            # So yes, Transpose.
-            
             policy.weights = [w.T for w in w_list]
             policy.biases = [b for b in b_list]
             
-            # Also TODO: Use mean/std from JSON for the env?
-            # The env currently outputs raw. The policy should handle normalized inputs?
-            # The current PolicyMLP assumes raw inputs or handles normalization itself?
-            # Ideally the policy should include the scaler means/stds.
-            # But the ES optimizer optimizes the WEIGHTS. 
-            # If we change the input dist, weights change.
-            # If we want to fine-tune, we must match the input scaling.
-            # We can grab mean/std from json and put it in a global scaler or similar?
-            # For simplicity, we will just start training. If inputs are scaled differently, 
-            # the weights will adapt quickly.
+            # Extract Normalization Stats
+            # Try metadata.normalization OR root mean/std
+            if "metadata" in weights_data and "normalization" in weights_data["metadata"]:
+                scaler_stats = weights_data["metadata"]["normalization"]
+                print("Loaded normalization from metadata.")
+            elif "mean" in weights_data and "std" in weights_data:
+                 scaler_stats = { "mean": weights_data["mean"], "std": weights_data["std"] }
+                 print("Loaded normalization from root fields.")
             
     else:
         print("Initializing random policy.")
+
+    # Create Env with Scaler if available
+    # If using init policy, we MUST use its scaler to make weights valid.
+    # If random, we use None (RoboEnv outputs raw) -> Policy learns on Raw.
+    # Note: Using Raw for random RL is fine, but if we want to export robustly,
+    # we might want to fit a scaler on random data? 
+    # For now, if no init policy, we stick to mean=0, std=1 (Raw).
+    env = RobotEnv(env_config, veh_config, scaler=scaler_stats)
 
     # Train
     trainer = ESTrainer(env, policy, pop_size=args.pop_size, sigma=0.1, alpha=args.alpha)
@@ -310,20 +317,32 @@ def main():
     dummy_model.coefs_ = best_policy.weights
     dummy_model.intercepts_ = best_policy.biases
     
-    # Dummy scaler stats (all zeros/ones if we trained directly on env observations)
-    # The RobotEnv currently outputs RAW readings.
-    # The PolicyMLP learned on RAW readings (implied).
-    # So mean=0, std=1 for the export.
+    # Determines export stats
+    if scaler_stats:
+        mean_obs = np.array(scaler_stats["mean"])
+        std_obs = np.array(scaler_stats["std"])
+    else:
+        mean_obs = np.zeros(input_dim)
+        std_obs = np.ones(input_dim)
     
-    mean_obs = np.zeros(input_dim)
-    std_obs = np.ones(input_dim)
+    # Metadata Construction
+    sensor_ids = sorted([s["id"] for s in veh_config.get("sensors", [])])
     
-    # Metadata
+    # RL Policy outputs [-1, 1], so we need to scale to physical limits 
+    # matching the RobotEnv logic.
+    max_v = float(env_config.get("max_v", 50.0))
+    max_w = float(env_config.get("max_w", 2.0))
+    
     metadata = {
-        "expected_num_sensors": env.n_sensors,
+        "sensors": sensor_ids,
+        "actionScale": {"linear": max_v, "angular": max_w},
+        "normalization": {
+            "mean": mean_obs.tolist(),
+            "std": std_obs.tolist()
+        },
         "input_dim": input_dim,
-        # Potentially map sensor IDs? Not available easily in RobotEnv yet aside from config.
-        # "expected_sensor_ids": ...
+        # Legacy fields if needed
+        "expected_num_sensors": env.n_sensors
     }
     
     train_policy.export_to_cpp(dummy_model, None, mean_obs, std_obs, filename=args.output_h, func_name="policy_rl_eval", metadata=metadata)

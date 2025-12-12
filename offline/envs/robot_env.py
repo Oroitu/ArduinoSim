@@ -10,16 +10,25 @@ class RobotEnv:
     - Sensors: Distance sensors (lidar/ultrasonic) + abstract state (v, w).
     - Note: This spec assumes distance-based sensing. Other sensors (line, IMU) require spec extensions.
     """
-    def __init__(self, env_config, vehicle_config):
+    def __init__(self, env_config, vehicle_config, scaler=None):
         self.env_config = env_config
         self.vehicle_config = vehicle_config
+        self.scaler = scaler # Expects { "mean": [], "std": [] }
         
         self.sim = SimpleSim(vehicle_config, env_config)
         
         # Dimensions for Obs
-        # N sensors + v + w
-        self.n_sensors = len(vehicle_config.get("sensors", []))
-        self.obs_dim = self.n_sensors + 2 
+        # N sensors + (servo_angles if any) + v + w
+        # Calculate dynamic input dim
+        obs_size = 0
+        sorted_sensors = sorted(self.vehicle_config.get("sensors", []), key=lambda s: s["id"])
+        for s in sorted_sensors:
+             obs_size += 1 # Distance
+             if s.get("servoId"):
+                 obs_size += 1 # Angle
+                 
+        self.n_sensors = obs_size # This naming is loose now
+        self.obs_dim = obs_size + 2 
         
         # Action dim: v_norm, w_norm
         self.act_dim = 2
@@ -72,15 +81,25 @@ class RobotEnv:
 
     def _get_obs(self):
         readings = self.sim.get_sensor_readings()
-        # Normalize? Using raw for now to match current pipeline,
-        # but scaler will handle it in training script.
         
         # Add velocity state (normalized or raw? match buildObservationVector in TS)
         # In TS: buildObservationVector(..., v, w) adds raw v, w.
-        # We should match that.
         
-        obs = readings + [self.sim.v, self.sim.w]
-        return np.array(obs, dtype=np.float32)
+        obs_list = readings + [self.sim.v, self.sim.w]
+        obs = np.array(obs_list, dtype=np.float32)
+        
+        # Apply Normalization if scaler is present
+        if self.scaler:
+            mean = np.array(self.scaler["mean"], dtype=np.float32)
+            std = np.array(self.scaler["std"], dtype=np.float32)
+            # Clip std to avoid div/0
+            std = np.where(std < 1e-6, 1.0, std)
+            
+            # Ensure dimensions match
+            if obs.shape[0] == mean.shape[0]:
+                 obs = (obs - mean) / std
+        
+        return obs
 
     def _calculate_reward(self, v, w, collision):
         # Base implementation for MOVILIDAD

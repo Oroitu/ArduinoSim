@@ -11,6 +11,19 @@ class SimpleSim:
         
         self.reset()
 
+        # Dimensions for Obs
+        # N sensors + (servo_angles if any) + v + w
+        # Calculate dynamic input dim
+        obs_size = 0
+        sorted_sensors = sorted(self.config.get("sensors", []), key=lambda s: s["id"])
+        for s in sorted_sensors:
+             obs_size += 1 # Distance
+             if s.get("servoId"):
+                 obs_size += 1 # Angle
+                 
+        self.n_sensors = obs_size # This naming is loose now
+        self.obs_dim = obs_size + 2 # For v and w
+
     def reset(self):
         # 1. World Bounds
         self.width = self.env_config.get("width", 1200)
@@ -139,6 +152,11 @@ class SimpleSim:
             
             rg = sensor["params"].get("range", 300)
             readings.append(self._raycast(sx, sy, stheta, rg))
+
+            # --- SERVO ANGLE SLOT ---
+            # If sensor has servoId, we must append the servo angle to match JS buildObservationVector
+            if "servoId" in sensor and sensor["servoId"]:
+                readings.append(0.0) # Placeholder 0 for now
             
         return readings
 

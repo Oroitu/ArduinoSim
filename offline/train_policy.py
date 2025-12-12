@@ -6,18 +6,31 @@ import argparse
 from sklearn.neural_network import MLPRegressor
 from sklearn.preprocessing import StandardScaler
 
-def load_data(demo_files):
+def load_data(demo_files, expected_dim=None):
     all_obs = []
     all_actions = []
     
+    skipped_count = 0
+    
     for fname in demo_files:
         print(f"Loading {fname}...")
-        with open(fname, 'r') as f:
-            data = json.load(f)
-            for sample in data['samples']:
-                # Flatten obs if needed, but it should be a list already
-                all_obs.append(sample['obs'])
-                all_actions.append(sample['action'])
+        try:
+            with open(fname, 'r') as f:
+                data = json.load(f)
+                for sample in data['samples']:
+                    obs = sample['obs']
+                    # Validate Dimension
+                    if expected_dim is not None and len(obs) != expected_dim:
+                        skipped_count += 1
+                        continue
+                        
+                    all_obs.append(obs)
+                    all_actions.append(sample['action'])
+        except Exception as e:
+            print(f"Error reading {fname}: {e}")
+            
+    if skipped_count > 0:
+        print(f"Warning: Skipped {skipped_count} samples due to dimension mismatch (Expected {expected_dim}).")
                 
     return np.array(all_obs), np.array(all_actions)
 
@@ -173,7 +186,8 @@ def export_to_json(model, mean_obs, std_obs, filename="learned_policy_weights.js
     }
     
     if metadata:
-        export_obj.update(metadata)
+        # We put metadata in a specific field, as the TS validation expects 'metadata.sensors', etc.
+        export_obj["metadata"] = metadata
     
     with open(filename, 'w') as f:
         json.dump(export_obj, f, indent=2)
@@ -188,18 +202,62 @@ if __name__ == "__main__":
     parser.add_argument("--out_json", type=str, default="learned_policy_weights.json")
     args = parser.parse_args()
     
+    # 1. Try to load vehicle config for metadata
+    config_path = os.path.join(os.path.dirname(__file__), "vehicle_config.json")
+    metadata = {}
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+                sensors = sorted([s["id"] for s in config.get("sensors", [])])
+                metadata["sensors"] = sensors
+                # Implicit rules for observations (servo angles?) could be documented here
+                print(f"Loaded config. Tracking sensors: {sensors}")
+        except Exception as e:
+            print(f"Error loading vehicle_config.json: {e}")
+    else:
+        print("Warning: vehicle_config.json not found. Exported policy will lack sensor metadata.")
+
     files = glob.glob(os.path.join(args.demo_dir, "demo_*.json"))
     if not files:
         print("No demo files found!")
         exit(1)
         
-    X, y = load_data(files)
+    # Calculate Expected Dimension from config
+    expected_dim = None
+    if metadata.get("input_dim"): 
+        expected_dim = metadata["input_dim"]
+    else:
+        # Infer from config if possible
+        # Sensors + ServoAngles (if any) + V + W
+        # Re-calc similar to robot_env
+        if os.path.exists(config_path):
+             with open(config_path, 'r') as f:
+                c = json.load(f)
+                dim = 0
+                for s in c.get("sensors", []):
+                    dim += 1
+                    if s.get("servoId"): dim += 1
+                dim += 2 # v, w
+                expected_dim = dim
+                metadata["input_dim"] = dim # Store for posterity
+
+    X, y = load_data(files, expected_dim)
     print(f"Dataset shape: X={X.shape}, y={y.shape}")
     
     # Normalize inputs
     scaler = StandardScaler()
     X_norm = scaler.fit_transform(X)
     
+    # Add normalization to metadata
+    metadata["normalization"] = {
+        "mean": scaler.mean_.tolist(),
+        "std": scaler.scale_.tolist()
+    }
+    
+    # Add action scaling (Static for now, can be made dynamic if we record map limits)
+    metadata["actionScale"] = { "linear": 1.0, "angular": 1.0 }
+
     # Train
     # Using small architecture as requested: 16, 8
     print("Training MLP...")
@@ -208,6 +266,6 @@ if __name__ == "__main__":
     
     print("Training score:", regr.score(X_norm, y))
     
-    export_to_cpp(regr, scaler, scaler.mean_, scaler.scale_, filename=args.out_h)
-    export_to_json(regr, scaler.mean_, scaler.scale_, filename=args.out_json)
+    export_to_cpp(regr, scaler, scaler.mean_, scaler.scale_, filename=args.out_h, metadata=metadata)
+    export_to_json(regr, scaler.mean_, scaler.scale_, filename=args.out_json, metadata=metadata)
     
