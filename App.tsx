@@ -142,6 +142,7 @@ const App: React.FC = () => {
 
   // --- Imitation Learning / Recording State ---
   const [isRecording, setIsRecording] = useState(false);
+  const [isProcessingImit, setIsProcessingImit] = useState(false);
   const currentEpisodeRef = useRef<DemoEpisode | null>(null);
 
   const startRecording = () => {
@@ -216,11 +217,15 @@ const App: React.FC = () => {
       .then(res => res.json())
       .then(data => {
         policyNetwork.load(data);
-        addLog("Loaded imitation policy weights", "system");
+        const errors = policyNetwork.validate(vehicleConfig);
+        if (errors.length > 0) {
+          errors.forEach(e => addLog(`Imitation Policy Warning: ${e}`, 'error'));
+        } else {
+          addLog("Loaded imitation policy weights (Valid)", "system");
+        }
       })
       .catch(err => {
         // Warning is expected if no model trained yet
-        // addLog("No trained policy found (learned_policy_weights.json)", "system");
       });
 
     // Load RL Policy
@@ -228,13 +233,18 @@ const App: React.FC = () => {
       .then(res => res.json())
       .then(data => {
         rlPolicyNetwork.load(data);
-        addLog("Loaded RL policy weights", "system");
+        const errors = rlPolicyNetwork.validate(vehicleConfig);
+        if (errors.length > 0) {
+          errors.forEach(e => addLog(`RL Policy Warning: ${e}`, 'error'));
+        } else {
+          addLog("Loaded RL policy weights (Valid)", "system");
+        }
       })
       .catch(err => {
         // Warning is expected if no model trained yet
       });
 
-  }, [addLog]);
+  }, [addLog, vehicleConfig]);
 
   // Synchronize Manager
   useEffect(() => {
@@ -898,6 +908,38 @@ ${code}
 
             <div className="flex items-center gap-4 ml-auto pr-4">
               <div className="h-4 w-px bg-slate-800" />
+              <button
+                onClick={() => {
+                  setIsProcessingImit(true);
+                  fetch('/api/train-policy', { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                      if (data.success) {
+                        addLog("Imitation Training Complete", "system");
+                        // Reload Policy
+                        fetch(`/learned_policy_weights.json?t=${Date.now()}`)
+                          .then(r => r.json())
+                          .then(w => {
+                            policyNetwork.load(w);
+                            const errs = policyNetwork.validate(vehicleConfig);
+                            if (errs.length) errs.forEach(e => addLog(e, 'error'));
+                            else addLog("Policy Reloaded & Validated", "system");
+                          })
+                          .catch(e => addLog("Failed to reload policy", "error"));
+                      } else {
+                        addLog(`Training Failed: ${data.error}`, "error");
+                      }
+                    })
+                    .catch(e => addLog(`Network Error: ${e}`, "error"))
+                    .finally(() => setIsProcessingImit(false));
+                }}
+                disabled={isProcessingImit || isRecording}
+                className={`flex items-center gap-1.5 px-2 py-1 ${isProcessingImit ? 'bg-amber-900/50 text-amber-400' : 'bg-indigo-900/40 hover:bg-indigo-900/60 text-indigo-300'} rounded transition-colors text-[10px] uppercase font-bold`}
+              >
+                {isProcessingImit ? <Brain size={14} className="animate-spin" /> : <Brain size={14} />}
+                {isProcessingImit ? 'TRAINING...' : 'PROCESS DEMOS'}
+              </button>
+
               {!isRecording ? (
                 <button onClick={startRecording} className="flex items-center gap-1.5 px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded transition-colors">
                   <Disc size={14} /> Rec
