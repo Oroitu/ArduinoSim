@@ -33,6 +33,7 @@ import {
   FolderUp, FolderDown, FileCode
 } from 'lucide-react';
 import { buildObservationVector } from './services/LearningService';
+import { validateProjectFile } from './services/ProjectValidator';
 
 function useHistory<T>(initialState: T) {
   const [past, setPast] = useState<T[]>([]);
@@ -70,14 +71,21 @@ function useHistory<T>(initialState: T) {
     });
   }, []);
 
-  return { state: present, setState, undo, redo, canUndo, canRedo };
+  const setStateWithoutHistory = useCallback((newState: T | ((prev: T) => T)) => {
+    setPresent((curr) => {
+      const val = typeof newState === 'function' ? (newState as Function)(curr) : newState;
+      return val;
+    });
+  }, []);
+
+  return { state: present, setState, setStateWithoutHistory, undo, redo, canUndo, canRedo };
 }
 
-const INITIAL_HARDWARE: HardwareState = {
+const getInitialHardware = (): HardwareState => ({
   pins: new Array(40).fill(0), // Increased pin count
   pinModes: [],
   millis: 0
-};
+});
 
 const getInitialRobotState = (startPos: Vector2D, startRot: number, config: VehicleConfig): RobotState => ({
   position: { ...startPos },
@@ -90,7 +98,7 @@ const getInitialRobotState = (startPos: Vector2D, startRot: number, config: Vehi
 
 const App: React.FC = () => {
   // --- Global State ---
-  const { state: world, setState: setWorld, undo, redo, canUndo, canRedo } = useHistory<WorldState>(DEFAULT_WORLD);
+  const { state: world, setState: setWorld, setStateWithoutHistory: setWorldWithoutHistory, undo, redo, canUndo, canRedo } = useHistory<WorldState>(DEFAULT_WORLD);
   const [vehicleConfig, setVehicleConfig] = useState<VehicleConfig>(DEFAULT_VEHICLE_CONFIG);
   const [code, setCode] = useState<string>(DEMO_CODE);
   const [generatedHeader, setGeneratedHeader] = useState<string>('');
@@ -120,7 +128,7 @@ const App: React.FC = () => {
   // --- Refs ---
   const robotRef = useRef<RobotState>(getInitialRobotState(DEFAULT_WORLD.startPosition, DEFAULT_WORLD.startRotation, DEFAULT_VEHICLE_CONFIG));
   const robotStartPosRef = useRef<Vector2D>({ x: 0, y: 0 }); // For snap-back
-  const hardwareRef = useRef<HardwareState>(INITIAL_HARDWARE);
+  const hardwareRef = useRef<HardwareState>(getInitialHardware());
   const codeRunnerRef = useRef<CodeRunner | null>(null);
   const requestRef = useRef<number>();
   const dragStartRef = useRef<{ x: number, y: number } | null>(null);
@@ -241,6 +249,13 @@ const App: React.FC = () => {
 
   // --- Simulation Control ---
   const startSim = () => {
+    // Cleanup previous run
+    if (codeRunnerRef.current) {
+      codeRunnerRef.current.dispose();
+      codeRunnerRef.current = null;
+    }
+
+    hardwareRef.current = getInitialHardware();
     robotRef.current = getInitialRobotState(world.startPosition, world.startRotation, vehicleConfig);
     const api = createAPI();
     const runner = new CodeRunner(api);
@@ -250,16 +265,22 @@ const App: React.FC = () => {
       setIsRunning(true);
       if (mode === 'edit' || mode === 'workshop') setMode('play');
     } else {
-      addLog("Compilation Failed", 'error');
+      addLog("Compilation/Worker Init Failed", 'error');
     }
   };
 
-  const stopSim = () => setIsRunning(false);
+  const stopSim = () => {
+    setIsRunning(false);
+    if (codeRunnerRef.current) {
+      codeRunnerRef.current.dispose();
+      codeRunnerRef.current = null;
+    }
+  };
 
   const resetSim = () => {
-    stopSim();
+    stopSim(); // Disposes runner
     robotRef.current = getInitialRobotState(world.startPosition, world.startRotation, vehicleConfig);
-    hardwareRef.current = { ...INITIAL_HARDWARE };
+    hardwareRef.current = getInitialHardware();
     setTick(t => t + 1);
     statsRef.current = { distance: 0, coveredArea: new Set<string>() };
     setSimStats({ time: 0, distance: 0, area: 0 });
@@ -276,22 +297,32 @@ const App: React.FC = () => {
     setIsTraining(true);
     addLog("Saving config and starting training...", "system");
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+
     try {
       // 1. Save Config
       const saveRes = await fetch('/api/save-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(vehicleConfig)
+        body: JSON.stringify(vehicleConfig),
+        signal: controller.signal
       });
-      if (!saveRes.ok) throw new Error("Failed to save config");
+      if (!saveRes.ok) throw new Error(`Failed to save config: ${saveRes.statusText}`);
 
       // 2. Trigger Train
       const trainRes = await fetch('/api/train-rl', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...trainingParams, world })
+        body: JSON.stringify({ ...trainingParams, world }),
+        signal: controller.signal
       });
-      if (!trainRes.ok) throw new Error("Training failed");
+
+      if (!trainRes.ok) {
+        if (trainRes.status === 504) throw new Error("Training timed out (Gateway Timeout)");
+        throw new Error(`Training failed: ${trainRes.statusText}`);
+      }
+
       const trainData = await trainRes.json();
 
       if (trainData.metrics) {
@@ -303,8 +334,6 @@ const App: React.FC = () => {
 
       // Visualization
       if (trainData.trajectory) {
-        // e.g. setTrajectory(trainData.trajectory)
-        // We need a state for this.
         addLog(`Received trajectory with ${trainData.trajectory.length} points`, "system");
         setLastTrajectory(trainData.trajectory);
       }
@@ -334,8 +363,13 @@ const App: React.FC = () => {
       }
 
     } catch (e: any) {
-      addLog(`Error during training: ${e.message}`, "error");
+      if (e.name === 'AbortError') {
+        addLog("Training timed out > 60s", "error");
+      } else {
+        addLog(`Error during training: ${e.message}`, "error");
+      }
     } finally {
+      clearTimeout(timeoutId);
       setIsTraining(false);
     }
   };
@@ -367,14 +401,29 @@ const App: React.FC = () => {
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
-        const project = JSON.parse(ev.target?.result as string);
-        if (project.vehicleConfig) setVehicleConfig(project.vehicleConfig);
-        if (project.world) setWorld(project.world);
-        if (project.code) setCode(project.code);
+        const json = JSON.parse(ev.target?.result as string);
+
+        // VALIDATION
+        const result = validateProjectFile(json);
+        if (!result.valid || !result.data) {
+          throw new Error(result.error || "Validation Failed");
+        }
+
+        const project = result.data;
+
+        // Batch Updates?
+        setVehicleConfig(project.vehicleConfig);
+        setWorldWithoutHistory(project.world); // Clean load (or use setWorld to allow undo?) - Usually loading resets history or starts state.
+        // Let's use setWorld to allow undoing the load if user regrets it, 
+        // BUT loading usually implies "Open", clearing history. 
+        // For now, let's just set it. 
+        setWorld(project.world);
+        setCode(project.code);
         if (project.trainingParams) setTrainingParams(project.trainingParams);
+
         addLog("Project loaded successfully", "system");
-      } catch (err) {
-        addLog("Failed to load project: Invalid JSON", "error");
+      } catch (err: any) {
+        addLog(`Failed to load project: ${err.message}`, "error");
       }
     };
     reader.readAsText(file);
@@ -517,7 +566,7 @@ ${code}
     robotRef.current = robot;
     hardwareRef.current = { ...hardware, millis: hardware.millis + (DT * 1000) };
 
-    setWorld(nextWorld);
+    setWorldWithoutHistory(nextWorld);
 
     requestRef.current = requestAnimationFrame(animate);
   }, [isRunning, world, vehicleConfig, activeBehavior]);
