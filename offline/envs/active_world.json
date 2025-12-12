@@ -2,8 +2,8 @@
   "width": 1200,
   "height": 800,
   "startPosition": {
-    "x": 565,
-    "y": 756
+    "x": 694,
+    "y": 66
   },
   "startRotation": 0,
   "objects": [
@@ -56,13 +56,13 @@
       "frictionMultiplier": 1
     },
     {
-      "id": "747orus2g",
+      "id": "zdigqqa2i",
       "type": "circuit",
-      "x": 605.5,
-      "y": 405,
-      "width": 1199,
-      "height": 802,
-      "radius": 599.5,
+      "x": 597,
+      "y": 400.5,
+      "width": 1194,
+      "height": 795,
+      "radius": 597,
       "rotation": 0,
       "color": "#64748b",
       "isPhysical": true,
