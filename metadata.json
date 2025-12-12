@@ -1,0 +1,5 @@
+{
+  "name": "Arduino Web Sim",
+  "description": "A 2D physics sandbox and Arduino-like code simulator. Write code to control a robot, visualize sensors, and interact with a virtual environment.",
+  "requestFramePermissions": []
+}
