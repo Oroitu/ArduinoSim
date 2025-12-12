@@ -1,0 +1,90 @@
+{
+  "chassis": {
+    "shape": "rect",
+    "width": 24,
+    "length": 32
+  },
+  "motors": [
+    {
+      "id": "m_left",
+      "name": "Left Motor",
+      "role": "left",
+      "pwmPin": 5,
+      "dirPin": -1,
+      "maxSpeed": 150,
+      "mount": {
+        "x": 0,
+        "y": -14,
+        "rotation": 0
+      }
+    },
+    {
+      "id": "m_right",
+      "name": "Right Motor",
+      "role": "right",
+      "pwmPin": 6,
+      "dirPin": -1,
+      "maxSpeed": 150,
+      "mount": {
+        "x": 0,
+        "y": 14,
+        "rotation": 0
+      }
+    }
+  ],
+  "servos": [
+    {
+      "id": "s_scan",
+      "name": "Scan Servo",
+      "pin": 9,
+      "minAngle": -90,
+      "maxAngle": 90,
+      "maxSpeed": 180
+    }
+  ],
+  "sensors": [
+    {
+      "id": "us_front",
+      "name": "Front Sonar",
+      "type": "ultrasonic",
+      "channel": "DIST_FRONT",
+      "mount": {
+        "x": 16,
+        "y": 0,
+        "rotation": 0
+      },
+      "color": "#10b981",
+      "params": {
+        "range": 200,
+        "fov": 0.2
+      },
+      "pins": {
+        "trigger": 14,
+        "echo": 14,
+        "analog": 14
+      }
+    },
+    {
+      "id": "us_scan",
+      "name": "Scan Sonar",
+      "type": "ultrasonic",
+      "channel": "DIST_SCAN",
+      "mount": {
+        "x": 5,
+        "y": 0,
+        "rotation": 0
+      },
+      "servoId": "s_scan",
+      "color": "#ef4444",
+      "params": {
+        "range": 200,
+        "fov": 0.2
+      },
+      "pins": {
+        "trigger": 15,
+        "echo": 15,
+        "analog": 15
+      }
+    }
+  ]
+}

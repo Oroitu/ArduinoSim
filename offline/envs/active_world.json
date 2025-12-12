@@ -1,0 +1,72 @@
+{
+  "width": 1200,
+  "height": 800,
+  "startPosition": {
+    "x": 565,
+    "y": 756
+  },
+  "startRotation": 0,
+  "objects": [
+    {
+      "id": "w1",
+      "type": "rect",
+      "x": 600,
+      "y": 5,
+      "width": 1200,
+      "height": 10,
+      "rotation": 0,
+      "color": "#94a3b8",
+      "isPhysical": true,
+      "frictionMultiplier": 1
+    },
+    {
+      "id": "w2",
+      "type": "rect",
+      "x": 600,
+      "y": 795,
+      "width": 1200,
+      "height": 10,
+      "rotation": 0,
+      "color": "#94a3b8",
+      "isPhysical": true,
+      "frictionMultiplier": 1
+    },
+    {
+      "id": "w3",
+      "type": "rect",
+      "x": 5,
+      "y": 400,
+      "width": 10,
+      "height": 800,
+      "rotation": 0,
+      "color": "#94a3b8",
+      "isPhysical": true,
+      "frictionMultiplier": 1
+    },
+    {
+      "id": "w4",
+      "type": "rect",
+      "x": 1195,
+      "y": 400,
+      "width": 10,
+      "height": 800,
+      "rotation": 0,
+      "color": "#94a3b8",
+      "isPhysical": true,
+      "frictionMultiplier": 1
+    },
+    {
+      "id": "747orus2g",
+      "type": "circuit",
+      "x": 605.5,
+      "y": 405,
+      "width": 1199,
+      "height": 802,
+      "radius": 599.5,
+      "rotation": 0,
+      "color": "#64748b",
+      "isPhysical": true,
+      "frictionMultiplier": 1
+    }
+  ]
+}

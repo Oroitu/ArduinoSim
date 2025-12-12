@@ -1,0 +1,41 @@
+{
+    "behavior": "MOVILIDAD",
+    "max_steps": 500,
+    "start_position": {
+        "x": 50,
+        "y": 50,
+        "theta": 0
+    },
+    "width": 800,
+    "height": 600,
+    "max_v": 50.0,
+    "max_w": 2.0,
+    "robot_radius": 15,
+    "obstacles": [
+        {
+            "type": "rect",
+            "x": 400,
+            "y": 300,
+            "width": 50,
+            "height": 50
+        },
+        {
+            "type": "circle",
+            "x": 200,
+            "y": 200,
+            "radius": 30
+        },
+        {
+            "type": "rect",
+            "x": 600,
+            "y": 400,
+            "width": 20,
+            "height": 100
+        }
+    ],
+    "reward_params": {
+        "alpha_dist": 1.0,
+        "beta_time": 0.05,
+        "gamma_coll": 100.0
+    }
+}
