@@ -19,6 +19,16 @@ export class MobilityRLBehavior implements IBehavior {
 
     step(ctx: BehaviorContext) {
         const { inputs } = ctx;
+
+        // Ensure scanner sweeps
+        this.config.sensors.forEach(s => {
+            if (s.servoId) {
+                const servo = this.config.servos.find(srv => srv.id === s.servoId);
+                const scanAngle = 60 * Math.sin(ctx.time * 4);
+                if (servo) inputs.servoWrite(servo.pin, scanAngle);
+            }
+        });
+
         let v = 0, w = 0;
         if ((ctx as any).robotState) {
             v = (ctx as any).robotState.velocity;

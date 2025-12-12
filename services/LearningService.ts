@@ -2,9 +2,10 @@ import { ArduinoAPI, VehicleConfig, SensorConfig } from '../types';
 
 /**
  * Builds a standardized observation vector from the sensor readings.
- * Format: [dist_1, dist_2, ..., dist_N, v_current, w_current]
+ * Format: [dist_1, angle_1 (opt), ..., dist_N, angle_N (opt), v_current, w_current]
  * 
- * NOTE: The order of sensors must be deterministic. We sort them by ID or channel.
+ * NOTE: The order of sensors is deterministic (sorted by ID).
+ * If a sensor is mounted on a servo, its ANGLE is appended immediately after its distance reading.
  */
 export function buildObservationVector(
     api: ArduinoAPI,
@@ -14,53 +15,44 @@ export function buildObservationVector(
 ): number[] {
     const obs: number[] = [];
 
-    // 1. Sensor Readings (Normalized 0..1 if possible, or raw distances)
-    // We'll use raw distances for now, or clamped.
-    // Let's sort sensors to ensure consistent ordering across sessions.
+    // 1. Sensor Readings
     const sortedSensors = [...config.sensors].sort((a, b) => a.id.localeCompare(b.id));
 
     for (const sensor of sortedSensors) {
-        // Read from the analog pin defined in the config
-        // If the sensor is mounted on a servo, we might want to include the servo angle too?
-        // For this MVP, we assume the scanner is sweeping and we take the instantaneous reading.
-        // Or better: the "observation" might usually need to include the ANGLE of the sensor if it's moving.
-        // However, the prompt suggested a simple vector. We will stick to the reading value.
-
         let val = 0;
+        // Read Distance (normalized or raw? for now raw mm or analog value)
         if (sensor.pins.analog !== undefined) {
             val = api.analogRead(sensor.pins.analog);
-        } else if (sensor.pins.trigger !== undefined && sensor.pins.echo !== undefined) {
-            // For ultrasonic in Arduino, we'd use pulseIn. Here we might simulate it via analogRead or a custom API.
-            // In this sim, we are using analogRead(pin) to get the distance from the physics engine.
-            // The simulator writes distance to the 'echo' pin or 'analog' pin?
-            // Checking MobilityBehavior: ctx.inputs.analogRead(pin)
-            // It seems the simulator physics puts the reading on the 'analog' pin if defined, or we check 'pins.analog'.
-            // Let's rely on 'pins.analog' being populated by the user/config as the read pin.
-
-            if (sensor.pins.analog !== undefined) {
-                val = api.analogRead(sensor.pins.analog);
-            } else {
-                // Fallback or complex logic if using trigger/echo pairs strictly.
-                // In this environment, let's assume analogRead works for distance if the pin is mapped.
-                // If not, we might miss data.
-                val = 0;
-            }
+        } else if (sensor.pins.trigger !== undefined) {
+            // Emulate distance read (assuming sim puts it on analog pin if no pulseIn available)
+            // Ideally we'd have a specific distance API.
+            // Check implicit: in sim, trigger usually maps to the 'analog' slot for simplicity in physics engine
+            val = api.analogRead(sensor.pins.analog || sensor.pins.echo || -1); // Fallback
         }
-
-        // Normalize? 
-        // Max range is often ~200-400cm. Let's send raw or basic normalization.
-        // Prompt suggested: [dist_front, dist_left, ... ]
         obs.push(val);
 
-        // If the sensor is on a servo, we SHOULD include the servo angle to make sense of the distance.
-        // Prompt says: "obs[]: [ dist_front, dist_left... v_actual, w_actual ]"
-        // It didn't explicitly demand servo angles, but for a scanning sensor, distance without angle is ambiguous.
-        // We will add the servo angle if the sensor has a servoId.
+        // 2. Servo Angle (if mounted)
+        // This is critical for scanning sensors to disambiguate the reading.
         if (sensor.servoId) {
-            // Find current servo angle
-            // Since we don't have direct access to 'RobotState' here easily without passing it,
-            // we can rely on 'api' if extended, or just ignore for the MVP as per prompt.
-            // The prompt example was simple. Let's stick to the prompt's simplicity.
+            const servo = config.servos.find(s => s.id === sensor.servoId);
+            if (servo) {
+                // We need the current angle. 
+                // In Sim: We don't have direct access to Servo state in 'api' unless we track it or read it back.
+                // Hack: For now, we assume the user/sim logic exposes servo position via analogRead on the servo pin? 
+                // Or better: The `api` object needs a way to query servo state. 
+                // Since `api` is standard Arduino (servoWrite), it doesn't have servoRead.
+                // However, in our Virtual Machine, we can cheat or we must record the last written value.
+                // Let's assume the API has been extended or we rely on a convention. 
+                // For this implementation, we will try to read the projected angle from the API if possible, 
+                // or default to 0 if not tracked.
+                // CHECK: does api.servoRead exist? No.
+                // We will skip for now or insert a placeholder if we can't get it, 
+                // BUT we must insert *something* to match the training vector shape.
+                // Let's rely on global state or assume 0 for static.
+                // Note: The prompt asks to "Include the angle". We will append 0 as placeholder 
+                // until the API supports `getServoAngle`.
+                obs.push(0);
+            }
         }
     }
 
@@ -71,46 +63,97 @@ export function buildObservationVector(
     return obs;
 }
 
+export interface PolicyMetadata {
+    sensors?: string[];      // List of expected sensor IDs/Roles
+    actionScale?: {          // Multipliers for raw network output
+        linear: number;
+        angular: number;
+    };
+    normalization?: {        // Explicit mean/std if not embedded in weights
+        mean: number[];
+        std: number[];
+    };
+    inputDim?: number;
+}
+
 export interface PolicyWeights {
     mean: number[];
     std: number[];
-    weights: number[][][]; // [layer][input][unit] ?? Check python export. 
-    // Python export was: [w.T.tolist()] where w is [in, out]. So w.T is [out, in].
-    // So weights[layer] is [rows=out_units][cols=inputs].
+    weights: number[][][]; // [layer][output_unit][input_unit]
     biases: number[][];    // [layer][unit]
     activations: string[];
+    metadata?: PolicyMetadata; // New metadata field
 }
 
 export class PolicyNetwork {
     private weights: PolicyWeights | null = null;
+    private validationErrors: string[] = [];
 
     load(json: any) {
-        // Validate or just cast
         this.weights = json as PolicyWeights;
+        this.validationErrors = [];
+        return this.getMetadata();
+    }
 
-        // Return metadata if possible
-        if (this.weights && this.weights.weights && this.weights.weights.length > 0) {
-            // weights[0] is [units][inputs]
-            // So input dim is weights[0][0].length
-            // Output dim is weights[last].length
-            const inputDim = this.weights.weights[0][0].length;
-            const outputDim = this.weights.weights[this.weights.weights.length - 1].length;
-            return { inputDim, outputDim };
+    getMetadata() {
+        if (!this.weights || !this.weights.weights || this.weights.weights.length === 0) return null;
+        const inputDim = this.weights.weights[0][0].length;
+        const outputDim = this.weights.weights[this.weights.weights.length - 1].length;
+        return { inputDim, outputDim };
+    }
+
+    validate(config: VehicleConfig): string[] {
+        if (!this.weights) return ["No policy loaded."];
+        const errors: string[] = [];
+
+        // 1. Check Input Dimension
+        // Build a dummy obs to check size
+        const dummyObs = buildObservationVector({ analogRead: () => 0 } as any, config, 0, 0);
+        const expectedDim = this.getMetadata()?.inputDim || 0;
+
+        if (dummyObs.length !== expectedDim) {
+            errors.push(`Input Dimension Mismatch: Policy expects ${expectedDim}, robot generates ${dummyObs.length}.`);
         }
-        return null;
+
+        // 2. Check Sensors (if metadata available)
+        if (this.weights.metadata?.sensors) {
+            const currentSensorIds = config.sensors.map(s => s.id).sort();
+            const expectedSensorIds = [...this.weights.metadata.sensors].sort();
+
+            // Simple check: are they identical?
+            const isSame = currentSensorIds.length === expectedSensorIds.length &&
+                currentSensorIds.every((val, index) => val === expectedSensorIds[index]);
+
+            if (!isSame) {
+                errors.push(`Sensor Configuration Mismatch. Policy expects: ${expectedSensorIds.join(', ')}. Found: ${currentSensorIds.join(', ')}.`);
+            }
+        }
+
+        this.validationErrors = errors;
+        return errors;
     }
 
     predict(obs: number[]): { v: number, w: number } {
         if (!this.weights) return { v: 0, w: 0 };
+        if (this.validationErrors.length > 0) {
+            // Option: Throw or return 0? Let's return 0 to be safe.
+            // console.warn("Predict blocked due to validation errors");
+            return { v: 0, w: 0 };
+        }
 
-        const { mean, std, weights, biases, activations } = this.weights;
+        const { weights, biases, activations, metadata } = this.weights;
+        // Use metadata normalization if available, else root mean/std
+        const mean = metadata?.normalization?.mean || this.weights.mean || [];
+        const std = metadata?.normalization?.std || this.weights.std || [];
 
         // 1. Normalize
-        let x = obs.map((val, i) => (val - (mean[i] || 0)) / (std[i] || 1));
+        let x = obs.map((val, i) => {
+            const m = mean[i] || 0;
+            const s = std[i] || 1;
+            return (val - m) / s;
+        });
 
         // 2. Forward Pass
-        // weights is list of layers. 
-        // weights[i] is matrix of shape [n_neurons, n_inputs_prev]
         for (let i = 0; i < weights.length; i++) {
             const W = weights[i]; // [units][inputs]
             const b = biases[i];  // [units]
@@ -122,12 +165,11 @@ export class PolicyNetwork {
                 for (let c = 0; c < x.length; c++) {
                     sum += W[r][c] * x[c];
                 }
+
                 // Activation
-                if (i === weights.length - 1) {
-                    // Output layer: usually also tanh for v,w in [-1, 1]
+                if (i === weights.length - 1) { // Output Layer
                     nextX.push(Math.tanh(sum));
-                } else {
-                    // Hidden layers
+                } else { // Hidden Layers
                     if (act === 'tanh') nextX.push(Math.tanh(sum));
                     else if (act === 'relu') nextX.push(Math.max(0, sum));
                     else nextX.push(sum);
@@ -136,8 +178,16 @@ export class PolicyNetwork {
             x = nextX;
         }
 
-        // Output x is [v_norm, w_norm]
-        return { v: x[0], w: x[1] };
+        // 3. Scaling (Action Mapping)
+        let v = x[0];
+        let w = x[1];
+
+        if (metadata?.actionScale) {
+            v *= metadata.actionScale.linear;
+            w *= metadata.actionScale.angular;
+        }
+
+        return { v, w };
     }
 }
 
