@@ -20,6 +20,15 @@ export class MobilityImitBehavior implements IBehavior {
     step(ctx: BehaviorContext) {
         const { inputs, robotState } = ctx;
 
+        // Ensure scanner sweeps (matching Manual Behavior for consistency)
+        this.config.sensors.forEach(s => {
+            if (s.servoId) {
+                const servo = this.config.servos.find(srv => srv.id === s.servoId);
+                const scanAngle = 60 * Math.sin(ctx.time * 4);
+                if (servo) inputs.servoWrite(servo.pin, scanAngle);
+            }
+        });
+
         // 1. Build Observation
         // NOTE: We need velocities. 
         // We can get them from robotState if available in ctx (I added it to App.tsx but need to check types.ts BehaviorContext)
