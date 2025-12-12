@@ -1,0 +1,14 @@
+/* Base styles for Arduino Web Sim fallback */
+:root {
+  color: #e2e8f0;
+  background-color: #0f172a;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+#root {
+  height: 100vh;
+}
