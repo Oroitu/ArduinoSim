@@ -483,6 +483,7 @@ ${code}
     let w_tele = 0;
 
     // Calculate Input / Run Code
+    // Calculate Input / Run Code
     if (activeBehavior !== BehaviorType.Program) {
       // --- TELEOP / BEHAVIOR MODE ---
       const k = keysRef.current;
@@ -493,32 +494,6 @@ ${code}
       const turn = 1.5;
       if (k.has('d') || k.has('ArrowRight')) w_tele += turn;
       if (k.has('a') || k.has('ArrowLeft')) w_tele -= turn;
-
-      // For recording, we use the teleop command as the "action"
-      v_cmd = v_tele;
-      w_cmd = w_tele;
-    } else {
-      // --- PROGRAM MODE ---
-      // Run User Code
-      codeRunnerRef.current?.runLoop();
-
-      // Extract "Action" from Hardware State (Inverse Kinematics)
-      // We need to know which pins are motors.
-      const leftMotor = vehicleConfig.motors.find(m => m.role === 'left');
-      const rightMotor = vehicleConfig.motors.find(m => m.role === 'right');
-      const leftPin = leftMotor ? leftMotor.pwmPin : 5;
-      const rightPin = rightMotor ? rightMotor.pwmPin : 6;
-
-      // Read Signed PWM (-255 to 255)
-      const lVal = hardwareRef.current.pins[leftPin] || 0;
-      const rVal = hardwareRef.current.pins[rightPin] || 0;
-
-      // Inverse Differential Drive
-      // L = 255(v - w), R = 255(v + w)
-      // v = (L + R) / 510
-      // w = (R - L) / 510
-      v_cmd = (lVal + rVal) / 510;
-      w_cmd = (rVal - lVal) / 510;
     }
 
     // Common Context
@@ -529,6 +504,36 @@ ${code}
       robotState: currentRobot,
       teleop: { v: v_tele, w: w_tele }
     };
+
+    // --- EXECUTION PHASE ---
+    if (activeBehavior !== BehaviorType.Program) {
+      // Run Behavior (Mobility, Escape, Manual, etc.)
+      // This writes to hardware pins
+      behaviorManagerRef.current.update(ctx);
+    } else {
+      // Run User Code
+      codeRunnerRef.current?.runLoop();
+    }
+
+    // --- INVERSE KINEMATICS (Extract v, w from Pins) ---
+    // We do this for ALL modes so we capture exactly what the motors are doing
+    const leftMotor = vehicleConfig.motors.find(m => m.role === 'left');
+    const rightMotor = vehicleConfig.motors.find(m => m.role === 'right');
+    const leftPin = leftMotor ? leftMotor.pwmPin : 5;
+    const rightPin = rightMotor ? rightMotor.pwmPin : 6;
+
+    // Read Signed PWM (-255 to 255)
+    const lVal = hardwareRef.current.pins[leftPin] || 0;
+    const rVal = hardwareRef.current.pins[rightPin] || 0;
+
+    // L = 255(v - w), R = 255(v + w)
+    // v = (L + R) / 510
+    // w = (R - L) / 510
+    const v_inv = (lVal + rVal) / 510;
+    const w_inv = (rVal - lVal) / 510;
+
+    v_cmd = v_inv;
+    w_cmd = w_inv;
 
     // --- RECORDING ---
     if (isRecording && currentEpisodeRef.current) {
@@ -541,11 +546,6 @@ ${code}
         action,
         pose: { x: currentRobot.position.x, y: currentRobot.position.y, theta: currentRobot.rotation }
       });
-    }
-
-    // Update Behavior (if active)
-    if (activeBehavior !== BehaviorType.Program) {
-      behaviorManagerRef.current.update(ctx);
     }
 
     // 2. Physics Update
@@ -893,19 +893,21 @@ ${code}
                     Running User Code
                   </div>
                 )}
-                <div className="h-4 w-px bg-slate-800" />
-
-                {!isRecording ? (
-                  <button onClick={startRecording} className="flex items-center gap-1.5 px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded transition-colors">
-                    <Disc size={14} /> Rec
-                  </button>
-                ) : (
-                  <button onClick={stopRecording} className="flex items-center gap-1.5 px-2 py-1 bg-red-600 text-white animate-pulse rounded hover:bg-red-700 transition-colors">
-                    <Square size={14} fill="currentColor" /> Stop Rec
-                  </button>
-                )}
               </div>
             )}
+
+            <div className="flex items-center gap-4 ml-auto pr-4">
+              <div className="h-4 w-px bg-slate-800" />
+              {!isRecording ? (
+                <button onClick={startRecording} className="flex items-center gap-1.5 px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded transition-colors">
+                  <Disc size={14} /> Rec
+                </button>
+              ) : (
+                <button onClick={stopRecording} className="flex items-center gap-1.5 px-2 py-1 bg-red-600 text-white animate-pulse rounded hover:bg-red-700 transition-colors">
+                  <Square size={14} fill="currentColor" /> Stop Rec
+                </button>
+              )}
+            </div>
           </div>
         )
       }
