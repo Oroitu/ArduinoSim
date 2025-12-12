@@ -6,8 +6,9 @@ import {
   DemoEpisode, DemoSample
 } from './types';
 import {
-  DEFAULT_WORLD, DT, DEMO_CODE, DEFAULT_VEHICLE_CONFIG
+  DEFAULT_WORLD, DT, DEFAULT_VEHICLE_CONFIG
 } from './constants';
+import { CODE_TEMPLATES, ADVANCED_CPP_CODE } from './services/AdvancedCode';
 import { updatePhysics, checkRobotCollision } from './services/PhysicsEngine';
 import { CodeRunner } from './services/CodeRunner';
 import { generateRobotHeader } from './services/ArduinoGenerator';
@@ -33,6 +34,7 @@ import {
   FolderUp, FolderDown, FileCode
 } from 'lucide-react';
 import { buildObservationVector } from './services/LearningService';
+import { validateProjectFile } from './services/ProjectValidator';
 
 function useHistory<T>(initialState: T) {
   const [past, setPast] = useState<T[]>([]);
@@ -70,14 +72,21 @@ function useHistory<T>(initialState: T) {
     });
   }, []);
 
-  return { state: present, setState, undo, redo, canUndo, canRedo };
+  const setStateWithoutHistory = useCallback((newState: T | ((prev: T) => T)) => {
+    setPresent((curr) => {
+      const val = typeof newState === 'function' ? (newState as Function)(curr) : newState;
+      return val;
+    });
+  }, []);
+
+  return { state: present, setState, setStateWithoutHistory, undo, redo, canUndo, canRedo };
 }
 
-const INITIAL_HARDWARE: HardwareState = {
+const getInitialHardware = (): HardwareState => ({
   pins: new Array(40).fill(0), // Increased pin count
   pinModes: [],
   millis: 0
-};
+});
 
 const getInitialRobotState = (startPos: Vector2D, startRot: number, config: VehicleConfig): RobotState => ({
   position: { ...startPos },
@@ -90,9 +99,9 @@ const getInitialRobotState = (startPos: Vector2D, startRot: number, config: Vehi
 
 const App: React.FC = () => {
   // --- Global State ---
-  const { state: world, setState: setWorld, undo, redo, canUndo, canRedo } = useHistory<WorldState>(DEFAULT_WORLD);
+  const { state: world, setState: setWorld, setStateWithoutHistory: setWorldWithoutHistory, undo, redo, canUndo, canRedo } = useHistory<WorldState>(DEFAULT_WORLD);
   const [vehicleConfig, setVehicleConfig] = useState<VehicleConfig>(DEFAULT_VEHICLE_CONFIG);
-  const [code, setCode] = useState<string>(DEMO_CODE);
+  const [code, setCode] = useState<string>(CODE_TEMPLATES.advanced);
   const [generatedHeader, setGeneratedHeader] = useState<string>('');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [mode, setMode] = useState<AppMode>('play');
@@ -120,7 +129,7 @@ const App: React.FC = () => {
   // --- Refs ---
   const robotRef = useRef<RobotState>(getInitialRobotState(DEFAULT_WORLD.startPosition, DEFAULT_WORLD.startRotation, DEFAULT_VEHICLE_CONFIG));
   const robotStartPosRef = useRef<Vector2D>({ x: 0, y: 0 }); // For snap-back
-  const hardwareRef = useRef<HardwareState>(INITIAL_HARDWARE);
+  const hardwareRef = useRef<HardwareState>(getInitialHardware());
   const codeRunnerRef = useRef<CodeRunner | null>(null);
   const requestRef = useRef<number>();
   const dragStartRef = useRef<{ x: number, y: number } | null>(null);
@@ -133,6 +142,7 @@ const App: React.FC = () => {
 
   // --- Imitation Learning / Recording State ---
   const [isRecording, setIsRecording] = useState(false);
+  const [isProcessingImit, setIsProcessingImit] = useState(false);
   const currentEpisodeRef = useRef<DemoEpisode | null>(null);
 
   const startRecording = () => {
@@ -207,11 +217,15 @@ const App: React.FC = () => {
       .then(res => res.json())
       .then(data => {
         policyNetwork.load(data);
-        addLog("Loaded imitation policy weights", "system");
+        const errors = policyNetwork.validate(vehicleConfig);
+        if (errors.length > 0) {
+          errors.forEach(e => addLog(`Imitation Policy Warning: ${e}`, 'error'));
+        } else {
+          addLog("Loaded imitation policy weights (Valid)", "system");
+        }
       })
       .catch(err => {
         // Warning is expected if no model trained yet
-        // addLog("No trained policy found (learned_policy_weights.json)", "system");
       });
 
     // Load RL Policy
@@ -219,13 +233,18 @@ const App: React.FC = () => {
       .then(res => res.json())
       .then(data => {
         rlPolicyNetwork.load(data);
-        addLog("Loaded RL policy weights", "system");
+        const errors = rlPolicyNetwork.validate(vehicleConfig);
+        if (errors.length > 0) {
+          errors.forEach(e => addLog(`RL Policy Warning: ${e}`, 'error'));
+        } else {
+          addLog("Loaded RL policy weights (Valid)", "system");
+        }
       })
       .catch(err => {
         // Warning is expected if no model trained yet
       });
 
-  }, [addLog]);
+  }, [addLog, vehicleConfig]);
 
   // Synchronize Manager
   useEffect(() => {
@@ -241,6 +260,13 @@ const App: React.FC = () => {
 
   // --- Simulation Control ---
   const startSim = () => {
+    // Cleanup previous run
+    if (codeRunnerRef.current) {
+      codeRunnerRef.current.dispose();
+      codeRunnerRef.current = null;
+    }
+
+    hardwareRef.current = getInitialHardware();
     robotRef.current = getInitialRobotState(world.startPosition, world.startRotation, vehicleConfig);
     const api = createAPI();
     const runner = new CodeRunner(api);
@@ -250,16 +276,22 @@ const App: React.FC = () => {
       setIsRunning(true);
       if (mode === 'edit' || mode === 'workshop') setMode('play');
     } else {
-      addLog("Compilation Failed", 'error');
+      addLog("Compilation/Worker Init Failed", 'error');
     }
   };
 
-  const stopSim = () => setIsRunning(false);
+  const stopSim = () => {
+    setIsRunning(false);
+    if (codeRunnerRef.current) {
+      codeRunnerRef.current.dispose();
+      codeRunnerRef.current = null;
+    }
+  };
 
   const resetSim = () => {
-    stopSim();
+    stopSim(); // Disposes runner
     robotRef.current = getInitialRobotState(world.startPosition, world.startRotation, vehicleConfig);
-    hardwareRef.current = { ...INITIAL_HARDWARE };
+    hardwareRef.current = getInitialHardware();
     setTick(t => t + 1);
     statsRef.current = { distance: 0, coveredArea: new Set<string>() };
     setSimStats({ time: 0, distance: 0, area: 0 });
@@ -276,22 +308,32 @@ const App: React.FC = () => {
     setIsTraining(true);
     addLog("Saving config and starting training...", "system");
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+
     try {
       // 1. Save Config
       const saveRes = await fetch('/api/save-config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(vehicleConfig)
+        body: JSON.stringify(vehicleConfig),
+        signal: controller.signal
       });
-      if (!saveRes.ok) throw new Error("Failed to save config");
+      if (!saveRes.ok) throw new Error(`Failed to save config: ${saveRes.statusText}`);
 
       // 2. Trigger Train
       const trainRes = await fetch('/api/train-rl', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...trainingParams, world })
+        body: JSON.stringify({ ...trainingParams, world }),
+        signal: controller.signal
       });
-      if (!trainRes.ok) throw new Error("Training failed");
+
+      if (!trainRes.ok) {
+        if (trainRes.status === 504) throw new Error("Training timed out (Gateway Timeout)");
+        throw new Error(`Training failed: ${trainRes.statusText}`);
+      }
+
       const trainData = await trainRes.json();
 
       if (trainData.metrics) {
@@ -303,8 +345,6 @@ const App: React.FC = () => {
 
       // Visualization
       if (trainData.trajectory) {
-        // e.g. setTrajectory(trainData.trajectory)
-        // We need a state for this.
         addLog(`Received trajectory with ${trainData.trajectory.length} points`, "system");
         setLastTrajectory(trainData.trajectory);
       }
@@ -334,11 +374,17 @@ const App: React.FC = () => {
       }
 
     } catch (e: any) {
-      addLog(`Error during training: ${e.message}`, "error");
+      if (e.name === 'AbortError') {
+        addLog("Training timed out > 60s", "error");
+      } else {
+        addLog(`Error during training: ${e.message}`, "error");
+      }
     } finally {
+      clearTimeout(timeoutId);
       setIsTraining(false);
     }
   };
+
 
   // --- Project Persistence ---
   const saveProject = () => {
@@ -367,14 +413,29 @@ const App: React.FC = () => {
     const reader = new FileReader();
     reader.onload = (ev) => {
       try {
-        const project = JSON.parse(ev.target?.result as string);
-        if (project.vehicleConfig) setVehicleConfig(project.vehicleConfig);
-        if (project.world) setWorld(project.world);
-        if (project.code) setCode(project.code);
+        const json = JSON.parse(ev.target?.result as string);
+
+        // VALIDATION
+        const result = validateProjectFile(json);
+        if (!result.valid || !result.data) {
+          throw new Error(result.error || "Validation Failed");
+        }
+
+        const project = result.data;
+
+        // Batch Updates?
+        setVehicleConfig(project.vehicleConfig);
+        setWorldWithoutHistory(project.world); // Clean load (or use setWorld to allow undo?) - Usually loading resets history or starts state.
+        // Let's use setWorld to allow undoing the load if user regrets it, 
+        // BUT loading usually implies "Open", clearing history. 
+        // For now, let's just set it. 
+        setWorld(project.world);
+        setCode(project.code);
         if (project.trainingParams) setTrainingParams(project.trainingParams);
+
         addLog("Project loaded successfully", "system");
-      } catch (err) {
-        addLog("Failed to load project: Invalid JSON", "error");
+      } catch (err: any) {
+        addLog(`Failed to load project: ${err.message}`, "error");
       }
     };
     reader.readAsText(file);
@@ -383,32 +444,40 @@ const App: React.FC = () => {
   };
 
   const exportArduinoCode = () => {
-    const fullCode = `/*
- * PROJECT: Arduino Web Sim Export
+    // If the user hasn't touched the advanced code (simple check), export the robust C++.
+    // Otherwise, wrap the JS as before (which won't compile in C++ but preserves their edits).
+    // Better: We explicitly check if it's the advanced template.
+    const isAdvanced = code.trim() === CODE_TEMPLATES.advanced.trim();
+
+    let content = "";
+    if (isAdvanced) {
+      content = `/*
+ * EXPORTED FROM WEBSIM (ADVANCED MODE)
  * DATE: ${new Date().toISOString()}
- * 
- * NOTE: This file concatenates the configuration header and the user sketch.
- * In a real project, you might split 'robot_config.h' into a separate file.
  */
 
-// ==========================================
-//        ROBOT CONFIGURATION
-// ==========================================
+${ADVANCED_CPP_CODE}`;
+    } else {
+      content = `/*
+ * EXPORTED FROM WEBSIM
+ * WARN: This is the raw simulation code (JS-like). 
+ * It may need manual porting to C++ if heavily modified.
+ */
+
 ${generatedHeader}
 
-// ==========================================
-//           USER SKETCH
-// ==========================================
 ${code}
 `;
-    const blob = new Blob([fullCode], { type: 'text/x-c' });
+    }
+
+    const blob = new Blob([content], { type: 'text/x-c' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `MyRobot_${Date.now()}.ino`;
+    a.download = isAdvanced ? `Robot_Advanced_${Date.now()}.ino` : `Robot_Sketch_${Date.now()}.ino`;
     a.click();
     URL.revokeObjectURL(url);
-    addLog("Arduino Code (.ino) exported", "system");
+    addLog("Arduino Code exported", "system");
   };
 
   // --- Loop ---
@@ -425,6 +494,7 @@ ${code}
     let w_tele = 0;
 
     // Calculate Input / Run Code
+    // Calculate Input / Run Code
     if (activeBehavior !== BehaviorType.Program) {
       // --- TELEOP / BEHAVIOR MODE ---
       const k = keysRef.current;
@@ -435,32 +505,6 @@ ${code}
       const turn = 1.5;
       if (k.has('d') || k.has('ArrowRight')) w_tele += turn;
       if (k.has('a') || k.has('ArrowLeft')) w_tele -= turn;
-
-      // For recording, we use the teleop command as the "action"
-      v_cmd = v_tele;
-      w_cmd = w_tele;
-    } else {
-      // --- PROGRAM MODE ---
-      // Run User Code
-      codeRunnerRef.current?.runLoop();
-
-      // Extract "Action" from Hardware State (Inverse Kinematics)
-      // We need to know which pins are motors.
-      const leftMotor = vehicleConfig.motors.find(m => m.role === 'left');
-      const rightMotor = vehicleConfig.motors.find(m => m.role === 'right');
-      const leftPin = leftMotor ? leftMotor.pwmPin : 5;
-      const rightPin = rightMotor ? rightMotor.pwmPin : 6;
-
-      // Read Signed PWM (-255 to 255)
-      const lVal = hardwareRef.current.pins[leftPin] || 0;
-      const rVal = hardwareRef.current.pins[rightPin] || 0;
-
-      // Inverse Differential Drive
-      // L = 255(v - w), R = 255(v + w)
-      // v = (L + R) / 510
-      // w = (R - L) / 510
-      v_cmd = (lVal + rVal) / 510;
-      w_cmd = (rVal - lVal) / 510;
     }
 
     // Common Context
@@ -471,6 +515,36 @@ ${code}
       robotState: currentRobot,
       teleop: { v: v_tele, w: w_tele }
     };
+
+    // --- EXECUTION PHASE ---
+    if (activeBehavior !== BehaviorType.Program) {
+      // Run Behavior (Mobility, Escape, Manual, etc.)
+      // This writes to hardware pins
+      behaviorManagerRef.current.update(ctx);
+    } else {
+      // Run User Code
+      codeRunnerRef.current?.runLoop();
+    }
+
+    // --- INVERSE KINEMATICS (Extract v, w from Pins) ---
+    // We do this for ALL modes so we capture exactly what the motors are doing
+    const leftMotor = vehicleConfig.motors.find(m => m.role === 'left');
+    const rightMotor = vehicleConfig.motors.find(m => m.role === 'right');
+    const leftPin = leftMotor ? leftMotor.pwmPin : 5;
+    const rightPin = rightMotor ? rightMotor.pwmPin : 6;
+
+    // Read Signed PWM (-255 to 255)
+    const lVal = hardwareRef.current.pins[leftPin] || 0;
+    const rVal = hardwareRef.current.pins[rightPin] || 0;
+
+    // L = 255(v - w), R = 255(v + w)
+    // v = (L + R) / 510
+    // w = (R - L) / 510
+    const v_inv = (lVal + rVal) / 510;
+    const w_inv = (rVal - lVal) / 510;
+
+    v_cmd = v_inv;
+    w_cmd = w_inv;
 
     // --- RECORDING ---
     if (isRecording && currentEpisodeRef.current) {
@@ -483,11 +557,6 @@ ${code}
         action,
         pose: { x: currentRobot.position.x, y: currentRobot.position.y, theta: currentRobot.rotation }
       });
-    }
-
-    // Update Behavior (if active)
-    if (activeBehavior !== BehaviorType.Program) {
-      behaviorManagerRef.current.update(ctx);
     }
 
     // 2. Physics Update
@@ -517,7 +586,7 @@ ${code}
     robotRef.current = robot;
     hardwareRef.current = { ...hardware, millis: hardware.millis + (DT * 1000) };
 
-    setWorld(nextWorld);
+    setWorldWithoutHistory(nextWorld);
 
     requestRef.current = requestAnimationFrame(animate);
   }, [isRunning, world, vehicleConfig, activeBehavior]);
@@ -749,20 +818,6 @@ ${code}
             <button onClick={exportArduinoCode} className="p-1.5 rounded hover:bg-slate-700 text-emerald-400" title="Export .ino"><FileCode size={16} /></button>
           </div>
 
-
-          <button
-            onClick={handleTrainAndExport}
-            disabled={isTraining || isRunning}
-            className={`flex items-center gap-2 px-4 py-1.5 mr-2 rounded-md text-xs font-bold transition-all ${isTraining
-              ? 'bg-amber-900/50 text-amber-500 cursor-wait'
-              : 'bg-indigo-600 hover:bg-indigo-500 text-white'
-              }`}
-            title="Save Config, Train RL, and Reload"
-          >
-            <Brain size={14} className={isTraining ? 'animate-pulse' : ''} />
-            {isTraining ? 'TRAINING...' : 'TRAIN & EXPORT'}
-          </button>
-
           {!isRunning ? (
             <button onClick={startSim} className="flex items-center gap-2 px-6 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-md text-sm font-medium transition-all">
               <Play size={16} fill="currentColor" /> Play
@@ -835,19 +890,53 @@ ${code}
                     Running User Code
                   </div>
                 )}
-                <div className="h-4 w-px bg-slate-800" />
-
-                {!isRecording ? (
-                  <button onClick={startRecording} className="flex items-center gap-1.5 px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded transition-colors">
-                    <Disc size={14} /> Rec
-                  </button>
-                ) : (
-                  <button onClick={stopRecording} className="flex items-center gap-1.5 px-2 py-1 bg-red-600 text-white animate-pulse rounded hover:bg-red-700 transition-colors">
-                    <Square size={14} fill="currentColor" /> Stop Rec
-                  </button>
-                )}
               </div>
             )}
+
+            <div className="flex items-center gap-4 ml-auto pr-4">
+              <div className="h-4 w-px bg-slate-800" />
+              <button
+                onClick={() => {
+                  setIsProcessingImit(true);
+                  fetch('/api/train-policy', { method: 'POST' })
+                    .then(res => res.json())
+                    .then(data => {
+                      if (data.success) {
+                        addLog("Imitation Training Complete", "system");
+                        // Reload Policy
+                        fetch(`/learned_policy_weights.json?t=${Date.now()}`)
+                          .then(r => r.json())
+                          .then(w => {
+                            policyNetwork.load(w);
+                            const errs = policyNetwork.validate(vehicleConfig);
+                            if (errs.length) errs.forEach(e => addLog(e, 'error'));
+                            else addLog("Policy Reloaded & Validated", "system");
+                          })
+                          .catch(e => addLog("Failed to reload policy", "error"));
+                      } else {
+                        addLog(`Training Failed: ${data.error}`, "error");
+                      }
+                    })
+                    .catch(e => addLog(`Network Error: ${e}`, "error"))
+                    .finally(() => setIsProcessingImit(false));
+                }}
+                disabled={isProcessingImit || isRecording}
+                className={`flex items-center gap-1.5 px-2 py-1 ${isProcessingImit ? 'bg-amber-900/50 text-amber-400' : 'bg-indigo-900/40 hover:bg-indigo-900/60 text-indigo-300'} rounded transition-colors text-[10px] uppercase font-bold`}
+              >
+                {isProcessingImit ? <Brain size={14} className="animate-spin" /> : <Brain size={14} />}
+                {isProcessingImit ? 'TRAINING...' : 'PROCESS DEMOS'}
+              </button>
+
+              {!isRecording ? (
+                <button onClick={startRecording} className="flex items-center gap-1.5 px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded transition-colors">
+                  <Disc size={14} /> Rec
+                </button>
+              ) : (
+                <button onClick={stopRecording} className="flex items-center gap-1.5 px-2 py-1 bg-red-600 text-white animate-pulse rounded hover:bg-red-700 transition-colors">
+                  <Square size={14} fill="currentColor" /> Stop Rec
+                </button>
+              )}
+            </div>
           </div>
         )
       }

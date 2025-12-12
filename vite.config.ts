@@ -58,6 +58,81 @@ const customServerPlugin = (): Plugin => ({
         return;
       }
 
+      if (req.url === '/api/train-policy' && req.method === 'POST') {
+        console.log('[Server] Starting Imitation Learning Training...');
+
+        // Define paths
+        const scriptPath = path.resolve(__dirname, 'offline/train_policy.py');
+        const outJson = path.resolve(__dirname, 'public/learned_policy_weights.json');
+        const outHeader = path.resolve(__dirname, 'public/learned_policy_imit.h');
+
+        // Command: python script.py --out_json ... --out_h ...
+        // Note: train_policy.py defaults to reading from offline/data adjacent to it, which is correct.
+        const command = `python "${scriptPath}" --out_json "${outJson}" --out_h "${outHeader}"`;
+
+        exec(command, { cwd: __dirname }, (error, stdout, stderr) => {
+          if (stdout) console.log(stdout);
+          if (stderr) console.error(stderr);
+
+          if (error) {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ success: false, error: error.message, stderr }));
+          } else {
+            res.statusCode = 200;
+            res.end(JSON.stringify({ success: true, message: "Imitation Training Complete" }));
+          }
+        });
+        return;
+      }
+
+      if (req.url === '/api/upload-rl-weights' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => body += chunk.toString());
+        req.on('end', () => {
+          try {
+            // Validate JSON
+            const json = JSON.parse(body);
+
+            // Paths
+            const publicPath = path.resolve(__dirname, 'public/learned_policy_rl_weights.json');
+            // We also update the one in root if it exists or is used, but public is the main one for the web app
+            const rootPath = path.resolve(__dirname, 'learned_policy_rl_weights.json');
+
+            fs.writeFileSync(publicPath, JSON.stringify(json, null, 2));
+            // Keep root in sync if needed by python scripts defaulting there
+            fs.writeFileSync(rootPath, JSON.stringify(json, null, 2));
+
+            res.statusCode = 200;
+            res.end(JSON.stringify({ success: true }));
+            console.log(`[Server] Uploaded RL weights to ${publicPath}`);
+          } catch (err) {
+            console.error(err);
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: 'Failed to write weights file' }));
+          }
+        });
+        return;
+      }
+
+      if (req.url === '/api/reset-rl-weights' && req.method === 'POST') {
+        try {
+          const publicPath = path.resolve(__dirname, 'public/learned_policy_rl_weights.json');
+          const rootPath = path.resolve(__dirname, 'learned_policy_rl_weights.json');
+
+          if (fs.existsSync(publicPath)) fs.unlinkSync(publicPath);
+          if (fs.existsSync(rootPath)) fs.unlinkSync(rootPath);
+
+          res.statusCode = 200;
+          res.end(JSON.stringify({ success: true, message: "RL weights reset (deleted)." }));
+          console.log(`[Server] Reset/Deleted RL weights.`);
+        } catch (err) {
+          console.error(err);
+          res.statusCode = 500;
+          res.end(JSON.stringify({ error: 'Failed to delete weights file' }));
+        }
+        return;
+      }
+
       // (Old /api/train-rl handler removed to avoid conflict with trainingMiddleware)
 
       next();
@@ -75,7 +150,7 @@ const trainingMiddleware = (): Plugin => ({
         req.on('data', chunk => body += chunk.toString());
         req.on('end', () => {
           console.log('[Server] Starting RL Training...');
-          let params = { generations: 20, pop_size: 16, alpha: 0.05, lambda_rot: 0.05, world: null };
+          let params = { generations: 20, pop_size: 16, alpha: 0.05, lambda_rot: 0.05, world: null, init_from_imit: false };
           try {
             const p = JSON.parse(body);
             params = { ...params, ...p };
@@ -87,9 +162,6 @@ const trainingMiddleware = (): Plugin => ({
             const worldPath = path.resolve(__dirname, 'offline/envs/active_world.json');
             try {
               // We might need to wrap it in a structure compatible with simple_sim or just pass raw
-              // simple_sim expects: { obstacles: [], width, height, ... }
-              // WorldState is: { objects, width, height... }
-              // We'll translate minimally here or in Python. 
               // Let's dump the whole object and let Python handle the mapping.
               fs.writeFileSync(worldPath, JSON.stringify(params.world, null, 2));
               envConfigArg = `--env_config "${worldPath}"`;
@@ -99,9 +171,22 @@ const trainingMiddleware = (): Plugin => ({
             }
           }
 
+          // 2. Init from Imitation Policy
+          let initPolicyArg = "";
+          if (params.init_from_imit) {
+            const publicPolicyPath = path.resolve(__dirname, 'public/learned_policy_weights.json');
+            // We pass the absolute path to be sure
+            if (fs.existsSync(publicPolicyPath)) {
+              initPolicyArg = `--init_policy "${publicPolicyPath}"`;
+              console.log(`[Server] Will init from: ${publicPolicyPath}`);
+            } else {
+              console.error("[Server] Init policy requested but file not found.");
+            }
+          }
+
           const scriptPath = path.resolve(__dirname, 'offline/train_rl.py');
           // Add env_config arg if we saved a world
-          const command = `python "${scriptPath}" --generations ${params.generations} --pop_size ${params.pop_size} --alpha ${params.alpha} --lambda_rot ${params.lambda_rot} ${envConfigArg}`;
+          const command = `python "${scriptPath}" --generations ${params.generations} --pop_size ${params.pop_size} --alpha ${params.alpha} --lambda_rot ${params.lambda_rot} ${envConfigArg} ${initPolicyArg}`;
 
           exec(command, { cwd: __dirname }, (error, stdout, stderr) => {
             // Log output to server console
