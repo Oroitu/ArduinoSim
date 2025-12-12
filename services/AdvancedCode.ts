@@ -460,10 +460,10 @@ void loop() {
   
   delay(LOOP_DT_MS);
 }
-\`;
+`;
 
 
-export const ADVANCED_JS_CODE = \`
+export const ADVANCED_JS_CODE = `
 // =============================================================
 //      ROBUST MODULAR CONTROLLER (JS PORT)
 // =============================================================
@@ -483,6 +483,12 @@ class EmaFilter {
     else { this.y = this.alpha * x + (1 - this.alpha) * this.y; }
     return this.y;
   }
+}
+
+class Timer {
+  constructor() { this.next = 0; }
+  due(t) { return (t - this.next) >= 0; }
+  arm(t, period) { this.next = t + period; }
 }
 
 // ---- HARDWARE ABSTRACTIONS ----
@@ -738,7 +744,7 @@ function loop() {
   // Actuate
   motors.setDifferential(cmd.v, cmd.w);
 }
-\`;
+`;
 
 import { DEMO_CODE } from '../constants';
 
